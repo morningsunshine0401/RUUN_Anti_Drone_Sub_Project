@@ -19,7 +19,7 @@ This project addresses the challenging problem of tracking small drones (as smal
 ### Key Features
 
 - ✅ **Small Object Tracking**: Successfully tracks drones as small as 5×5 pixels
-- ✅ **Real-time Performance**: 50-55 FPS on Jetson Orin Nano
+- ✅ **Real-time Performance**: 30-45 FPS on Jetson Orin Nano
 - ✅ **Hybrid Strategy**: Combines YOLO detection with DaSiamRPN tracking
 - ✅ **Sparse Tracking**: Novel optimization reducing computational overhead by 2.7×
 - ✅ **Manual Initialization**: Allows human-in-the-loop for distant targets
@@ -29,9 +29,7 @@ This project addresses the challenging problem of tracking small drones (as smal
 ## 📊 Performance
 
 - **FPS**: 50+ on Jetson Orin Nano
-- **Small Object Tracking**: Successfully tracks drones as small as 5×5 pixels
-- **Detection Coverage**: 85% YOLO, 13% DaSiamRPN backup
-- **Reliability**: <2% false positives, <2% lost frames
+- **Small Object Tracking**: Successfully tracks drones as small as 5×5 pixel
 
 ## 🚀 Quick Start
 
