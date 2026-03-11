@@ -99,12 +99,12 @@ Final Result (30+ FPS)
 
 ### Tuning Tips
 
-**For speed** (60+ FPS):
+**For speed** (40+ FPS):
 ```bash
 --tracking-interval 5 --jump-threshold 300
 ```
 
-**For accuracy** (40-45 FPS):
+**For accuracy** (30-35 FPS):
 ```bash
 --tracking-interval 2 --jump-threshold 150
 ```
