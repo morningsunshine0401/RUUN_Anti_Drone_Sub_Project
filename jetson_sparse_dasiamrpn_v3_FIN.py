@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Optimized Hybrid Detection + DaSiamRPN
-- Run YOLO every frame (primary)
-- Run DaSiamRPN every N frames (e.g., every 3 frames)
-- Use cached result in between
-- Much faster while keeping DaSiamRPN accuracy!
+Hybrid Detection + DaSiamRPN tracker
+
+YOLO runs every frame.
+DaSiamRPN runs every N frames for validation.
+Cached tracking results are used in between to reduce computation.
 """
 
 import cv2
@@ -17,7 +17,7 @@ import torch
 import sys
 from os.path import realpath, dirname, join
 
-# DaSiamRPN imports
+# DaSiamRPN modules
 sys.path.insert(0, './DaSiamRPN/code')
 from net import SiamRPNvot
 from run_SiamRPN import SiamRPN_init, SiamRPN_track
@@ -26,37 +26,37 @@ from utils import cxy_wh_2_rect
 
 class SparseDaSiamRPNTracker:
     """
-    Optimized: Run DaSiamRPN every N frames to save time
-    Example: tracking_interval=3 means run every 3rd frame
+    Detection + tracking hybrid pipeline.
+    Tracking is executed periodically to reduce runtime cost.
     """
-    
+
     def __init__(self, detector_path, conf_threshold=0.5, jump_threshold=100,
                  dasiamrpn_model='./DaSiamRPN/code/SiamRPNVOT.model',
                  tracking_interval=3):
-        
-        print(f"🔍 Loading YOLO model: {detector_path}")
+
+        print(f"Loading YOLO model: {detector_path}")
         self.detector = YOLO(detector_path)
         self.conf_threshold = conf_threshold
         self.jump_threshold = jump_threshold
         self.tracking_interval = tracking_interval
-        
-        # DaSiamRPN tracker
-        print(f"🧠 Loading DaSiamRPN model: {dasiamrpn_model}")
+
+        # Load DaSiamRPN tracker
+        print(f"Loading DaSiamRPN model: {dasiamrpn_model}")
         self.net = SiamRPNvot()
         self.net.load_state_dict(torch.load(dasiamrpn_model))
         self.net.eval()
-        
+
         if torch.cuda.is_available():
             self.net = self.net.cuda()
-            print("🚀 DaSiamRPN using CUDA")
+            print("DaSiamRPN running on CUDA")
         else:
-            print("🧊 DaSiamRPN using CPU")
-        
+            print("DaSiamRPN running on CPU")
+
         self.dasiamrpn_state = None
         self.tracking_initialized = False
         self.last_track_bbox = None
         self.track_frame_count = 0
-        
+
         # Statistics
         self.frame_count = 0
         self.detection_used = 0
@@ -65,85 +65,85 @@ class SparseDaSiamRPNTracker:
         self.both_failed = 0
         self.track_computed = 0
         self.track_cached = 0
-        
+
         # Warmup YOLO
-        print("🔥 Warming up YOLO GPU...")
+        print("Warming up YOLO...")
         dummy = np.zeros((640, 640, 3), dtype=np.uint8)
         self.detector.predict(dummy, verbose=False)
-        
-        print(f"✅ Ready (DaSiamRPN every {tracking_interval} frames, jump threshold: {jump_threshold}px)")
-    
+
+        print(f"Initialization complete (tracking interval: {tracking_interval}, jump threshold: {jump_threshold})")
+
     def init_tracker(self, frame, bbox):
         """Initialize DaSiamRPN tracker"""
         x, y, w, h = bbox
-        
-        # Validate bbox
+
+        # Clamp bbox to image boundary
         h_frame, w_frame = frame.shape[:2]
         x = max(0, min(x, w_frame - 1))
         y = max(0, min(y, h_frame - 1))
         w = max(1, min(w, w_frame - x))
         h = max(1, min(h, h_frame - y))
-        
+
         if w < 3 or h < 3:
             return False
-        
+
         try:
-            # Convert bbox to center + size format
+            # Convert bbox to center-size format
             cx = x + w / 2.0
             cy = y + h / 2.0
             target_pos = np.array([cx, cy])
             target_sz = np.array([w, h])
-            
-            # Initialize DaSiamRPN
+
+            # Initialize DaSiamRPN state
             self.dasiamrpn_state = SiamRPN_init(frame, target_pos, target_sz, self.net)
             self.tracking_initialized = True
             self.last_track_bbox = bbox
-            
+
             return True
-            
+
         except Exception as e:
             if not hasattr(self, '_init_error_printed'):
-                print(f"⚠️ DaSiamRPN init failed: {e}")
+                print(f"DaSiamRPN initialization failed: {e}")
                 self._init_error_printed = True
             return False
-    
+
     def track(self, frame):
         """Update DaSiamRPN tracker"""
         if not self.tracking_initialized or self.dasiamrpn_state is None:
             return None
-        
+
         try:
-            # Track with DaSiamRPN
+            # Run tracker update
             self.dasiamrpn_state = SiamRPN_track(self.dasiamrpn_state, frame)
             self.track_computed += 1
-            
-            # Extract bbox from state
+
+            # Read tracking result
             target_pos = self.dasiamrpn_state['target_pos']
             target_sz = self.dasiamrpn_state['target_sz']
-            
-            # Convert to [x, y, w, h] format
+
+            # Convert to [x, y, w, h]
             cx, cy = target_pos[0], target_pos[1]
             w, h = target_sz[0], target_sz[1]
-            
+
             x = cx - w / 2.0
             y = cy - h / 2.0
-            
+
             tracked_bbox = [int(x), int(y), int(w), int(h)]
-            
-            # Sanity check
+
+            # Simple validity check
             h_frame, w_frame = frame.shape[:2]
             if (x < -100 or y < -100 or w < 3 or h < 3 or
                 x > w_frame + 100 or y > h_frame + 100):
                 self.tracking_initialized = False
                 return None
-            
+
             self.last_track_bbox = tracked_bbox
             return tracked_bbox
-            
-        except Exception as e:
+
+        except Exception:
             self.tracking_initialized = False
             return None
-    
+
     def detect(self, frame):
         """Run YOLO detection"""
         results = self.detector.predict(
@@ -151,127 +151,127 @@ class SparseDaSiamRPNTracker:
             conf=self.conf_threshold,
             verbose=False
         )
-        
+
         if len(results) == 0 or len(results[0].boxes) == 0:
             return None, 0.0
-        
+
         boxes = results[0].boxes
         confs = boxes.conf.cpu().numpy()
         best_idx = int(np.argmax(confs))
-        
+
         box = boxes[best_idx]
         xyxy = box.xyxy[0].cpu().numpy()
         conf = float(box.conf[0])
-        
+
         x1, y1, x2, y2 = xyxy
-        bbox = [int(x1), int(y1), int(x2-x1), int(y2-y1)]
-        
+        bbox = [int(x1), int(y1), int(x2 - x1), int(y2 - y1)]
+
         return bbox, conf
-    
+
     def calculate_distance(self, bbox1, bbox2):
-        """Calculate center distance between bboxes"""
+        """Calculate center distance between two bboxes"""
         if bbox1 is None or bbox2 is None:
             return float('inf')
-        
+
         x1, y1, w1, h1 = bbox1
         x2, y2, w2, h2 = bbox2
-        
+
         cx1 = x1 + w1 / 2.0
         cy1 = y1 + h1 / 2.0
         cx2 = x2 + w2 / 2.0
         cy2 = y2 + h2 / 2.0
-        
-        return np.sqrt((cx1 - cx2)**2 + (cy1 - cy2)**2)
-    
+
+        return np.sqrt((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2)
+
     def process_frame(self, frame):
         """
-        Optimized processing:
-        - Detection every frame (YOLO is fast)
-        - DaSiamRPN: Run every N frames when detection succeeds (sparse validation)
-        - DaSiamRPN: Run EVERY frame when detection fails (must track!)
-        - Use cached result only when detection is working
+        Processing logic:
+        - YOLO detection runs every frame
+        - DaSiamRPN runs every N frames when detection is available
+        - DaSiamRPN runs every frame when detection fails
+        - Cached tracker output is used between sparse updates
         """
         self.frame_count += 1
-        
-        # Always try detection
+
+        # Detection every frame
         det_bbox, det_conf = self.detect(frame)
-        
-        # Tracking strategy depends on detection success
+
+        # Tracking behavior depends on detection availability
         track_bbox = None
         if self.tracking_initialized:
             if det_bbox is None:
-                # Detection FAILED - must run tracker!
+                # Detection failed, so run tracker immediately
                 track_bbox = self.track(frame)
                 self.track_computed += 1
             else:
-                # Detection succeeded - can use sparse tracking
+                # Detection succeeded, sparse tracking is enough
                 self.track_frame_count += 1
-                
+
                 if self.track_frame_count >= self.tracking_interval:
-                    # Time to run tracker for validation
+                    # Periodic tracker validation
                     track_bbox = self.track(frame)
                     self.track_computed += 1
                     self.track_frame_count = 0
                 else:
-                    # Detection is working, use cached for validation only
+                    # Use cached tracking result between updates
                     track_bbox = self.last_track_bbox
                     self.track_cached += 1
-        
-        # Decision logic
+
+        # Final decision
         final_bbox = None
         final_conf = 0.0
         status = 'LOST'
-        
+
         if det_bbox is not None and track_bbox is not None:
-            # Both available - validate detection
+            # Use tracker to validate detection
             distance = self.calculate_distance(det_bbox, track_bbox)
-            
+
             if distance > self.jump_threshold:
-                # Detection jumped - trust tracker
+                # Detection moved too much, keep tracker result
                 final_bbox = track_bbox
                 status = 'TRACKED (det rejected)'
                 self.tracking_used += 1
                 self.detection_rejected += 1
             else:
-                # Detection is good
+                # Detection is accepted
                 final_bbox = det_bbox
                 final_conf = det_conf
                 status = 'DETECTED'
                 self.detection_used += 1
-                
-                # Re-initialize tracker
+
+                # Refresh tracker with accepted detection
                 self.init_tracker(frame, det_bbox)
                 self.track_frame_count = 0
-        
+
         elif det_bbox is not None:
-            # Only detection
+            # Detection only
             final_bbox = det_bbox
             final_conf = det_conf
             status = 'DETECTED'
             self.detection_used += 1
-            
-            # Initialize tracker
+
+            # Initialize tracker from detection
             self.init_tracker(frame, det_bbox)
             self.track_frame_count = 0
-        
+
         elif track_bbox is not None:
-            # Only tracking (detection failed)
+            # Tracking only
             final_bbox = track_bbox
             status = 'TRACKED (no det)'
             self.tracking_used += 1
-        
+
         else:
-            # Both failed
+            # Detection and tracking both failed
             status = 'LOST'
             self.both_failed += 1
-        
+
         return final_bbox, status, final_conf
 
 
 def draw_bbox(frame, bbox, status, conf, fps, frame_idx, stats):
-    """Draw bounding box and info"""
-    
-    # Colors
+    """Draw bbox and tracking information"""
+
+    # Color by state
     colors = {
         'DETECTED': (0, 255, 0),
         'TRACKED (no det)': (255, 165, 0),
@@ -279,65 +279,65 @@ def draw_bbox(frame, bbox, status, conf, fps, frame_idx, stats):
         'LOST': (0, 0, 255)
     }
     color = colors.get(status, (255, 255, 255))
-    
+
     # Draw bbox
     if bbox is not None:
         x, y, w, h = bbox
-        cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
-        print("Center:",x+w/2,y+h/2)
-        
+        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+        print("Center:", x + w / 2, y + h / 2)
+
         # Label
         if conf > 0:
             label = f"{status} {conf:.2f}"
         else:
             label = status
-        
+
         (label_w, label_h), _ = cv2.getTextSize(
             label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2
         )
-        cv2.rectangle(frame, (x, y-label_h-10), (x+label_w, y), color, -1)
-        cv2.putText(frame, label, (x, y-5),
+        cv2.rectangle(frame, (x, y - label_h - 10), (x + label_w, y), color, -1)
+        cv2.putText(frame, label, (x, y - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-        
-        # Size
+
+        # Show bbox size
         size_text = f"{w}x{h}"
-        cv2.putText(frame, size_text, (x, y+h+15),
+        cv2.putText(frame, size_text, (x, y + h + 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-    
+
     # FPS
     cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    
-    # Frame
+
+    # Frame index
     cv2.putText(frame, f"Frame: {frame_idx}", (10, 60),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    
-    # Statistics
+
+    # Running statistics
     if stats['frame_count'] > 0:
         det_pct = stats['detection_used'] / stats['frame_count'] * 100
         trk_pct = stats['tracking_used'] / stats['frame_count'] * 100
         rej_pct = stats['detection_rejected'] / stats['frame_count'] * 100
         fail_pct = stats['both_failed'] / stats['frame_count'] * 100
-        
+
         y_pos = 90
         cv2.putText(frame, f"Det: {det_pct:.0f}%", (10, y_pos),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-        
+
         y_pos += 25
         cv2.putText(frame, f"Track: {trk_pct:.0f}%", (10, y_pos),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 165, 0), 2)
-        
+
         y_pos += 25
         cv2.putText(frame, f"Reject: {rej_pct:.0f}%", (10, y_pos),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 100, 0), 2)
-        
-        # Track efficiency
+
+        # Cached tracking usage
         if stats['track_computed'] + stats['track_cached'] > 0:
             y_pos += 25
             cached_pct = stats['track_cached'] / (stats['track_computed'] + stats['track_cached']) * 100
             cv2.putText(frame, f"Cached: {cached_pct:.0f}%", (10, y_pos),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 200, 255), 2)
-    
+
     return frame
 
 
@@ -372,81 +372,78 @@ def gstreamer_pipeline(
 
 def manual_init_select_bbox(cap):
     """
-    Manual bbox selection for initial target:
-    - 'n': next frame
-    - 's': select ROI on current frame
-    - 'q'/'ESC': cancel and auto-start
-    
-    Returns: (frame, bbox_xywh) or (None, None) if cancelled
+    Manual bbox selection at startup
+
+    Controls:
+    - n : next frame
+    - s : select ROI
+    - q / ESC : cancel and use auto detection
     """
-    print("\n" + "="*60)
-    print("📍 MANUAL INITIALIZATION")
-    print("="*60)
+    print("\n" + "=" * 60)
+    print("Manual initialization mode")
+    print("=" * 60)
     print("Controls:")
-    print("  'n' - Next frame")
-    print("  's' - Select ROI (draw bounding box)")
-    print("  'q' or ESC - Cancel and use auto-detection")
-    print("="*60 + "\n")
-    
+    print("  n : next frame")
+    print("  s : select ROI")
+    print("  q or ESC : cancel and continue with auto detection")
+    print("=" * 60 + "\n")
+
     frame_idx = 0
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("❌ Failed to read frame")
+            print("Failed to read frame")
             return None, None
-        
+
         frame_idx += 1
-        
-        # Display frame with instructions
+
+        # Show current frame with instructions
         display = frame.copy()
         cv2.putText(display, f"Frame {frame_idx} | 'n':next  's':select  'q':cancel",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(display, "Find your target and press 's' to select",
+        cv2.putText(display, "Move to the desired frame and press 's' to select the target",
                     (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        
+
         cv2.imshow("Manual Init - Select Target", display)
         key = cv2.waitKey(0) & 0xFF
-        
+
         if key == ord('n'):
-            # Next frame
             continue
-        
+
         elif key == ord('s'):
-            # Select ROI
-            print("📦 Draw bounding box around target...")
-            bbox = cv2.selectROI("Manual Init - Select Target", frame, 
-                                fromCenter=False, showCrosshair=True)
+            print("Draw a bounding box around the target.")
+            bbox = cv2.selectROI("Manual Init - Select Target", frame,
+                                 fromCenter=False, showCrosshair=True)
             x, y, w, h = [int(v) for v in bbox]
-            
+
             if w > 0 and h > 0:
-                print(f"✅ Bbox selected: x={x}, y={y}, w={w}, h={h}")
+                print(f"Selected bbox: x={x}, y={y}, w={w}, h={h}")
                 cv2.destroyWindow("Manual Init - Select Target")
                 return frame, [x, y, w, h]
             else:
-                print("⚠️ Invalid bbox, try again...")
+                print("Invalid bbox. Please try again.")
                 continue
-        
-        elif key == ord('q') or key == 27:  # ESC
-            print("⚠️ Manual init cancelled - will use auto-detection")
+
+        elif key == ord('q') or key == 27:
+            print("Manual initialization cancelled. Auto detection will be used.")
             cv2.destroyWindow("Manual Init - Select Target")
             return None, None
-    
+
     return None, None
 
 
 def run_inference(tracker, source, output_path=None, use_csi=False, no_display=False, manual_init=False):
     """Run inference"""
-    
+
     # Open source
     if isinstance(source, int):
         camera_id = source
-        
+
         if use_csi:
-            print(f"🎥 Opening CSI camera {camera_id}...")
+            print(f"Opening CSI camera {camera_id}")
             cap = cv2.VideoCapture(gstreamer_pipeline(sensor_id=camera_id), cv2.CAP_GSTREAMER)
         else:
-            print(f"🎥 Opening USB camera {camera_id}...")
-            #cap = cv2.VideoCapture(camera_id)
+            print(f"Opening USB camera {camera_id}")
             cap = cv2.VideoCapture(camera_id, cv2.CAP_V4L2)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
@@ -455,11 +452,10 @@ def run_inference(tracker, source, output_path=None, use_csi=False, no_display=F
         if source.isdigit():
             camera_id = int(source)
             if use_csi:
-                print(f"🎥 Opening CSI camera {camera_id}...")
+                print(f"Opening CSI camera {camera_id}")
                 cap = cv2.VideoCapture(gstreamer_pipeline(sensor_id=camera_id), cv2.CAP_GSTREAMER)
             else:
-                print(f"🎥 Opening USB camera {camera_id}...")
-                #cap = cv2.VideoCapture(camera_id)
+                print(f"Opening USB camera {camera_id}")
                 cap = cv2.VideoCapture(camera_id, cv2.CAP_V4L2)
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
@@ -468,72 +464,72 @@ def run_inference(tracker, source, output_path=None, use_csi=False, no_display=F
             import os
             video_path = os.path.expanduser(source)
             if not os.path.exists(video_path):
-                print(f"❌ Video file not found: {video_path}")
+                print(f"Video file not found: {video_path}")
                 return
-            
-            print(f"🎥 Opening video: {video_path}")
+
+            print(f"Opening video file: {video_path}")
             cap = cv2.VideoCapture(video_path)
-    
+
     if not cap.isOpened():
-        print("❌ Failed to open source")
+        print("Failed to open source")
         return
-    
-    # Get info
+
+    # Input info
     fps = int(cap.get(cv2.CAP_PROP_FPS))
     if fps <= 0:
         fps = 30
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
-    print(f"📹 Input: {width}x{height} @ {fps}fps")
-    
-    # Manual initialization (if requested)
+
+    print(f"Input: {width}x{height} @ {fps}fps")
+
+    # Optional manual initialization
     if manual_init:
         init_frame, init_bbox = manual_init_select_bbox(cap)
         if init_frame is not None and init_bbox is not None:
-            print("🎯 Initializing tracker with manual bbox...")
+            print("Initializing tracker with manual bbox")
             tracker.init_tracker(init_frame, init_bbox)
-            print("✅ Tracker initialized! Starting tracking...")
+            print("Tracker initialized. Starting tracking.")
         else:
-            print("⚠️ Manual init skipped - will use auto-detection")
-    
-    # Video writer
+            print("Manual initialization skipped. Auto detection will be used.")
+
+    # Output writer
     out = None
     if output_path:
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-        print(f"💾 Recording to: {output_path}")
-    
-    # FPS tracking
+        print(f"Saving output to: {output_path}")
+
+    # FPS buffer
     fps_history = deque(maxlen=30)
-    
-    print("🚀 Starting... (Press ESC to quit)")
-    print("\n" + "="*60)
-    print("Strategy:")
-    print("- Detection every frame (YOLO - fast)")
+
+    print("Starting processing (ESC to quit)")
+    print("\n" + "=" * 60)
+    print("Tracking strategy:")
+    print(" - YOLO detection runs every frame")
     if tracker.tracking_initialized:
-        print("- Tracker initialized manually (tracking first!)")
-    print(f"- DaSiamRPN every {tracker.tracking_interval} frames (saves time!)")
-    print("- Cached result used in between")
-    print("="*60 + "\n")
-    
+        print(" - Tracker initialized manually")
+    print(f" - DaSiamRPN runs every {tracker.tracking_interval} frames")
+    print(" - Cached tracking result used between updates")
+    print("=" * 60 + "\n")
+
     try:
         while True:
             start_time = time.time()
-            
+
             ret, frame = cap.read()
             if not ret:
                 break
-            
-            # Process
+
+            # Main processing
             bbox, status, conf = tracker.process_frame(frame)
-            
+
             # FPS
             elapsed = time.time() - start_time
             current_fps = 1.0 / elapsed if elapsed > 0 else 0
             fps_history.append(current_fps)
             avg_fps = np.mean(fps_history)
-            
+
             # Stats
             stats = {
                 'frame_count': tracker.frame_count,
@@ -544,70 +540,70 @@ def run_inference(tracker, source, output_path=None, use_csi=False, no_display=F
                 'track_computed': tracker.track_computed,
                 'track_cached': tracker.track_cached
             }
-            
-            # Draw
+
+            # Visualization
             frame = draw_bbox(frame, bbox, status, conf, avg_fps, tracker.frame_count, stats)
-            
+
             # Display
             if not no_display:
                 cv2.imshow("Sparse DaSiamRPN Tracker", frame)
-            
-            # Save
+
+            # Save frame
             if out:
                 out.write(frame)
-            
-            # Quit
+
+            # Exit
             if cv2.waitKey(1) & 0xFF == 27:
                 break
-    
+
     except KeyboardInterrupt:
-        print("\n⚠️ Interrupted")
-    
+        print("\nProcess interrupted")
+
     finally:
         cap.release()
         if out:
             out.release()
         cv2.destroyAllWindows()
-        
-        # Final stats
-        print("\n" + "="*60)
-        print("📊 Performance Summary")
-        print("="*60)
+
+        # Summary
+        print("\n" + "=" * 60)
+        print("Performance summary")
+        print("=" * 60)
         print(f"Total frames: {tracker.frame_count}")
-        
+
         if tracker.frame_count > 0:
             det_pct = tracker.detection_used / tracker.frame_count * 100
             trk_pct = tracker.tracking_used / tracker.frame_count * 100
             rej_pct = tracker.detection_rejected / tracker.frame_count * 100
             fail_pct = tracker.both_failed / tracker.frame_count * 100
-            
+
             print(f"\nDetection: {tracker.detection_used} ({det_pct:.1f}%)")
             print(f"Tracking: {tracker.tracking_used} ({trk_pct:.1f}%)")
             print(f"Rejected: {tracker.detection_rejected} ({rej_pct:.1f}%)")
             print(f"Lost: {tracker.both_failed} ({fail_pct:.1f}%)")
-            
+
             print(f"\nDaSiamRPN computed: {tracker.track_computed}")
             print(f"DaSiamRPN cached: {tracker.track_cached}")
             if tracker.track_computed + tracker.track_cached > 0:
                 cached_pct = tracker.track_cached / (tracker.track_computed + tracker.track_cached) * 100
                 print(f"Cache efficiency: {cached_pct:.1f}%")
-        
+
         if fps_history:
             print(f"\nAverage FPS: {np.mean(fps_history):.1f}")
             print(f"Min FPS: {np.min(fps_history):.1f}")
             print(f"Max FPS: {np.max(fps_history):.1f}")
-        
-        print("="*60)
+
+        print("=" * 60)
 
 
 def main():
     parser = argparse.ArgumentParser(
         description='Optimized Hybrid Detection + DaSiamRPN with Manual Init'
     )
-    
+
     parser.add_argument('--model', type=str, default='best_fp16.engine',
                         help='YOLO model path')
-    parser.add_argument('--dasiamrpn-model', type=str, 
+    parser.add_argument('--dasiamrpn-model', type=str,
                         default='./DaSiamRPN/code/SiamRPNVOT.model',
                         help='DaSiamRPN model path')
     parser.add_argument('--source', type=str, default='0',
@@ -626,10 +622,10 @@ def main():
                         help='Use CSI camera')
     parser.add_argument('--no-display', action='store_true',
                         help='Headless mode')
-    
+
     args = parser.parse_args()
-    
-    # Initialize
+
+    # Initialize tracker
     tracker = SparseDaSiamRPNTracker(
         detector_path=args.model,
         conf_threshold=args.conf,
@@ -637,14 +633,14 @@ def main():
         dasiamrpn_model=args.dasiamrpn_model,
         tracking_interval=args.tracking_interval
     )
-    
+
     # Parse source
     if args.source.isdigit():
         source = int(args.source)
     else:
         source = args.source
-    
-    # Run
+
+    # Run inference
     run_inference(
         tracker,
         source=source,
