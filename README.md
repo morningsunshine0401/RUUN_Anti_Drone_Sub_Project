@@ -8,7 +8,7 @@ A high-performance hybrid detection and tracking system for small drones using Y
 
 ## 🎥 Demo
 
-https://github.com/yourusername/drone-tracking/assets/youruserid/vd.mp4
+./vd.mp4
 
 > Real-time tracking of small drones with manual initialization and sparse DaSiamRPN tracking.
 
