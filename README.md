@@ -2,10 +2,9 @@
 
 A high-performance hybrid detection and tracking system for small drones using YOLO and DaSiamRPN on NVIDIA Jetson platforms.
 
-![System Performance](https://img.shields.io/badge/FPS-50--55-brightgreen)
+![System Performance](https://img.shields.io/badge/FPS-30--45-brightgreen)
 ![Platform](https://img.shields.io/badge/Platform-Jetson%20Orin%20Nano-orange)
-![Detection](https://img.shields.io/badge/Detection%20Rate-85%25-blue)
-![Tracking](https://img.shields.io/badge/Tracking%20Coverage-13%25-yellow)
+
 
 ## 🎥 Demo
 
