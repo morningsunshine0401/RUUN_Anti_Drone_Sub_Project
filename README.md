@@ -1,4 +1,4 @@
-# Real-time Small Drone Tracking System
+# Simple Small Drone Tracking System
 
 High-performance drone tracking on NVIDIA Jetson using YOLO + DaSiamRPN with sparse tracking optimization.
 
